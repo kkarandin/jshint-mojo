@@ -79,6 +79,11 @@ public class Mojo extends AbstractMojo {
 	 */
 	private String reportFile = "";
 
+	/**
+	 * @parameter property="customJSHint"
+	 */
+	private File customJSHint = null;
+
     /**
      * @parameter expression="${jshint.version}"
      */
@@ -110,13 +115,21 @@ public class Mojo extends AbstractMojo {
 		this.reporter = reporter;
 		this.reportFile = reportFile;
 	}
-	
-	public void execute() throws MojoExecutionException, MojoFailureException {
-	    getLog().info("using jshint version " + version);
 
-	    final String jshintCode = getEmbeddedJshintCode(version);
-	    
-        final JSHint jshint = new JSHint(jshintCode);
+    public void execute() throws MojoExecutionException, MojoFailureException {
+        final JSHint jshint;
+        if (customJSHint == null) {
+            getLog().info("using jshint version " + version);
+            final String jshintCode = getEmbeddedJshintCode(version);
+            jshint = new JSHint(jshintCode);
+        } else {
+            getLog().info("using customJSHint " + customJSHint);
+            try {
+                jshint = new JSHint(customJSHint);
+            } catch (IOException e) {
+                throw new MojoExecutionException("Could not load customJSHint", e);
+            }
+        }
 
         final Config config = readConfig(this.options, this.globals, this.configFile, this.basedir, getLog());
         final Cache.Hash cacheHash = new Cache.Hash(config.options, config.globals, this.version, this.configFile, this.directories, this.excludes);
