@@ -1,10 +1,13 @@
 package com.cj.jshintmojo.jshint;
 
+import java.io.File;
 import java.io.InputStream;
+import java.io.IOException;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
 import org.mozilla.javascript.EcmaError;
 import org.mozilla.javascript.NativeArray;
@@ -16,22 +19,30 @@ public class JSHint {
     
     private final Rhino rhino;
     
+    public JSHint(File customJSHint) throws IOException {
+        rhino = createRhino(FileUtils.readFileToString(customJSHint, "UTF-8"));
+    }
+
     public JSHint(String jshintCode) {
-        
-        rhino = new Rhino();
+        rhino = createRhino(resourceAsString(jshintCode));
+    }
+
+    private static Rhino createRhino(final String code) {
+        Rhino result = new Rhino();
         try {
-            rhino.eval(
+            result.eval(
             		"print=function(){};" +
             		"quit=function(){};" +
             		"arguments=[];");
             
-            rhino.eval(commentOutTheShebang(resourceAsString(jshintCode)));
+            result.eval(commentOutTheShebang(code));
         } catch (EcmaError e) {
             throw new RuntimeException("Javascript eval error:" + e.getScriptStackTrace(), e);
         }
+        return result;
     }
 
-    private String commentOutTheShebang(String code) {
+    private static String commentOutTheShebang(String code) {
         String minusShebang = code.startsWith("#!")?"//" + code : code;
         return minusShebang;
     }
