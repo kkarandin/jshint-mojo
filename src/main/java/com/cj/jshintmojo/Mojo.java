@@ -36,6 +36,14 @@ import com.cj.jshintmojo.reporter.JSLintReporter;
 import com.cj.jshintmojo.util.OptionsParser;
 import com.cj.jshintmojo.util.Util;
 import java.util.Collections;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * @goal lint
@@ -124,20 +132,27 @@ public class Mojo extends AbstractMojo {
 		this.ignoreFile = ignoreFile;
 	}
 
+    @Override
     public void execute() throws MojoExecutionException, MojoFailureException {
-        final JSHint jshint;
-        if (customJSHint == null) {
-            getLog().info("using jshint version " + version);
-            final String jshintCode = getEmbeddedJshintCode(version);
-            jshint = new JSHint(jshintCode);
-        } else {
-            getLog().info("using customJSHint " + customJSHint);
-            try {
-                jshint = new JSHint(customJSHint);
-            } catch (IOException e) {
-                throw new MojoExecutionException("Could not load customJSHint", e);
+        final Callable<JSHint> jshintFactory = new Callable<JSHint>() {
+            @Override
+            public JSHint call() throws Exception {
+                final JSHint jshint;
+                if (customJSHint == null) {
+                    getLog().debug("using jshint version " + version);
+                    final String jshintCode = getEmbeddedJshintCode(version);
+                    jshint = new JSHint(jshintCode);
+                } else {
+                    getLog().debug("using customJSHint " + customJSHint);
+                    try {
+                        jshint = new JSHint(customJSHint);
+                    } catch (IOException e) {
+                        throw new MojoExecutionException("Could not load customJSHint", e);
+                    }
+                }
+                return jshint;
             }
-        }
+        };
 
         final Config config = readConfig(this.options, this.globals, this.configFile, this.basedir, getLog());
         if (this.excludes.isEmpty() || (this.ignoreFile != null && !this.ignoreFile.isEmpty())) {
@@ -157,7 +172,7 @@ public class Mojo extends AbstractMojo {
 			
 			final List<File> files = findFilesToCheck();
 
-			final Map<String, Result> currentResults = lintTheFiles(jshint, cache, files, config, getLog());
+			final Map<String, Result> currentResults = lintTheFiles(jshintFactory, cache, files, config, getLog());
 			
 			Util.writeObject(new Cache(cacheHash, currentResults), cachePath);
 			
@@ -257,28 +272,43 @@ public class Mojo extends AbstractMojo {
         return javascriptFiles;
     }
 
-    private static Map<String, Result> lintTheFiles(final JSHint jshint, final Cache cache, List<File> filesToCheck, final Config config, final Log log) throws FileNotFoundException {
+    private static Map<String, Result> lintTheFiles(final Callable<JSHint> jshintFactory, final Cache cache, List<File> filesToCheck, final Config config, final Log log) throws FileNotFoundException {
+        int cores = Runtime.getRuntime().availableProcessors();
+        final ExecutorService executorService = Executors.newFixedThreadPool(cores);
+        final List<Future<Result>> futures = new ArrayList<Future<Result>>();
+        for (final File file : filesToCheck) {
+            futures.add(executorService.submit(new Callable<Result>() {
+                @Override
+                public Result call() throws Exception {
+                    Result previousResult = cache.previousResults.get(file.getAbsolutePath());
+                    Result theResult;
+                    if (previousResult == null || (previousResult.lastModified.longValue() != file.lastModified())) {
+                        log.debug("  " + file);
+                        final JSHint jshint = jshintFactory.call();
+                        List<Error> errors = jshint.run(new FileInputStream(file), config.options, config.globals);
+                        theResult = new Result(file.getAbsolutePath(), file.lastModified(), errors);
+                    } else {
+                        log.debug("  " + file + " [no change]");
+                        theResult = previousResult;
+                    }
+                    return theResult;
+                }
+            }));
+        }
+        executorService.shutdown();
         final Map<String, Result> currentResults = new HashMap<String, Result>();
-        for(File file : filesToCheck){
-        	Result previousResult = cache.previousResults.get(file.getAbsolutePath());
-        	Result theResult;
-        	if(previousResult==null || (previousResult.lastModified.longValue()!=file.lastModified())){
-        		log.info("  " + file );
-        		List<Error> errors = jshint.run(new FileInputStream(file), config.options, config.globals);
-        		theResult = new Result(file.getAbsolutePath(), file.lastModified(), errors); 
-        	}else{
-        		log.info("  " + file + " [no change]");
-        		theResult = previousResult;
-        	}
-        	
-        	if(theResult!=null){
-        		currentResults.put(theResult.path, theResult);
-        		Result r = theResult;
-        		currentResults.put(r.path, r);
-        		for(Error error: r.errors){
-        			log.error("   " + error.line.intValue() + "," + error.character.intValue() + ": " + error.reason);
-        		}
-        	}
+        try {
+            while (!executorService.awaitTermination(10, TimeUnit.SECONDS)) {
+                log.info("Working ...");
+            }
+            for (Future<Result> future : futures) {
+                Result r = future.get();
+                currentResults.put(r.path, r);
+            }
+        } catch (InterruptedException ex) {
+            log.error(ex);
+        } catch (ExecutionException ex) {
+            log.error(ex);
         }
         return currentResults;
     }
