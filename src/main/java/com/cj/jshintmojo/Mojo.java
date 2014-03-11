@@ -18,6 +18,13 @@ import java.util.Set;
 
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang.builder.EqualsBuilder;
+import org.apache.maven.plugin.AbstractMojo;
+import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.plugin.MojoFailureException;
+import org.apache.maven.plugin.logging.Log;
+import org.codehaus.plexus.util.StringUtils;
+import org.apache.commons.io.FileUtils;
+import org.apache.commons.lang.builder.EqualsBuilder;
 import org.apache.maven.model.FileSet;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
@@ -44,6 +51,19 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import com.cj.jshintmojo.cache.Cache;
+import com.cj.jshintmojo.cache.Result;
+import com.cj.jshintmojo.jshint.EmbeddedJshintCode;
+import com.cj.jshintmojo.jshint.FunctionalJava;
+import com.cj.jshintmojo.jshint.FunctionalJava.Fn;
+import com.cj.jshintmojo.jshint.JSHint;
+import com.cj.jshintmojo.jshint.JSHint.Error;
+import com.cj.jshintmojo.reporter.CheckStyleReporter;
+import com.cj.jshintmojo.reporter.JSHintReporter;
+import com.cj.jshintmojo.reporter.JSLintReporter;
+import com.cj.jshintmojo.util.OptionsParser;
+import com.cj.jshintmojo.util.Util;
 
 /**
  * @goal lint
@@ -115,6 +135,22 @@ public class Mojo extends AbstractMojo {
 	 * @required
 	 */
 	File basedir;
+
+	/**
+      * <i>Maven Internal</i>: Project to interact with.
+      *
+      * @parameter expression="${project}"
+      * @required
+      * @readonly
+      */
+ 	private MavenProject project;
+
+	/**
+	 * @component
+	 * @required
+	 * @readonly
+	 */
+	private ResourceManager resourceManager;
 	
 	public Mojo() {}
 	
@@ -153,6 +189,14 @@ public class Mojo extends AbstractMojo {
                 return jshint;
             }
         };
+		//configure ResourceManager
+        resourceManager.addSearchPath(FileResourceLoader.ID, project.getFile().getParentFile().getAbsolutePath());
+        resourceManager.addSearchPath("url", "");
+        resourceManager.setOutputDirectory(new File(project.getBuild().getDirectory()));
+
+	    final String jshintCode = getEmbeddedJshintCode(version);
+	    
+        final JSHint jshint = new JSHint(jshintCode);
 
         final Config config = readConfig(this.options, this.globals, this.configFile, this.basedir, getLog());
         if (this.excludes.isEmpty() || (this.ignoreFile != null && !this.ignoreFile.isEmpty())) {
@@ -193,12 +237,19 @@ public class Mojo extends AbstractMojo {
         }
 	    
 	}
-	
-    private static Config readConfig(String options, String globals, String configFileParam, File basedir, Log log) throws MojoExecutionException {
-        final File jshintRc = findJshintrc(basedir);
-        final File configFile = StringUtils.isNotBlank(configFileParam)?new File(basedir, configFileParam):null;
-        
-        final Config config;
+
+	private Config readConfig(String options, String globals, String configFileParam, File basedir, Log log) throws MojoExecutionException {
+		final File jshintRc = findJshintrc(basedir);
+		final File configFile;
+		try {
+			configFile = StringUtils.isNotBlank(configFileParam) ? resourceManager.getResourceAsFile(configFileParam) : null;
+		} catch (ResourceNotFoundException e) {
+			throw new MojoExecutionException("Cannot read options file", e);
+		} catch (FileResourceCreationException e) {
+			throw new MojoExecutionException("Cannot read options file", e);
+		}
+
+		final Config config;
         if(options==null){
             if(configFile!=null){
                 log.info("Using configuration file: " + configFile.getAbsolutePath());
@@ -269,7 +320,22 @@ public class Mojo extends AbstractMojo {
                 javascriptFiles.addAll(toFileList(fs));
             }
         }
-        return javascriptFiles;
+
+        List<File> matches = FunctionalJava.filter(javascriptFiles, new Fn<File, Boolean>(){
+        	public Boolean apply(File i) {
+        		for(String exclude : excludes){
+        			File e = new File(basedir, exclude);
+        			if(i.getAbsolutePath().startsWith(e.getAbsolutePath())){
+        				getLog().warn("Excluding " + i);
+        				
+        				return Boolean.FALSE;
+        			}
+        		}
+
+        		return Boolean.TRUE;
+        	}
+        });
+        return matches;
     }
 
     private static Map<String, Result> lintTheFiles(final Callable<JSHint> jshintFactory, final Cache cache, List<File> filesToCheck, final Config config, final Log log) throws FileNotFoundException {
@@ -424,21 +490,7 @@ public class Mojo extends AbstractMojo {
         
         return null;
     }
-
-    private static File findJshintignore(File cwd) {
-        File placeToLook = cwd;
-        while (placeToLook.getParentFile() != null) {
-            File ignoreFile = new File(placeToLook, ".jshintignore");
-            if (ignoreFile.exists()) {
-                return ignoreFile;
-            } else {
-                placeToLook = placeToLook.getParentFile();
-            }
-        }
-
-        return null;
-    }
-
+	
 	private static boolean nullSafeEquals(String a, String b) {
 		if(a==null && b==null) return true;
 		else if(a==null || b==null) return false;
@@ -462,6 +514,16 @@ public class Mojo extends AbstractMojo {
 		}
 		
 		return new Cache(hash);
+	}
+	
+	private void collect(File directory, List<File> files) {
+		for(File next : directory.listFiles()){
+			if(next.isDirectory()){
+				collect(next, files);
+			}else if(next.getName().endsWith(".js")){
+				files.add(next);
+			}
+		}
 	}
 
 	/**
